@@ -1,5 +1,5 @@
 /* @ts-ignore */
-import * as libsignal from 'libsignal'
+import * as libsignal from '@whiskeysockets/libsignal'
 import type { SignalAuthState } from '../Types'
 import type { SignalRepository } from '../Types/Signal'
 import { generateSignalPubKey } from '../Utils'

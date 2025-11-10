@@ -2,7 +2,6 @@ import type { SignalAuthState, SignalRepository } from '../Types/index.js';
 import type { AuthenticationCreds, AuthenticationState, KeyPair, SignalIdentity, SignalKeyStore, SignedKeyPair } from '../Types/Auth.js';
 import { type BinaryNode, type JidWithDevice } from '../WABinary/index.js';
 import type { USyncQueryResultList } from '../WAUSync/index.js';
-import * as libsignal from "libsignal";
 import { SenderKeyRecord } from '../Signal/Group/index.js';
 export declare const createSignalIdentity: (wid: string, accountSignatureKey: Uint8Array) => SignalIdentity;
 export declare const getPreKeys: ({ get }: SignalKeyStore, min: number, limit: number) => Promise<{
@@ -33,9 +32,9 @@ export declare const getNextPreKeysNode: (state: AuthenticationState, count: num
     update: Partial<AuthenticationCreds>;
     node: BinaryNode;
 }>;
-export declare const jidToSignalProtocolAddress: (jid: string) => libsignal.ProtocolAddress;
+export declare const jidToSignalProtocolAddress: (jid: string) => any;
 export declare const signalStorage: ({ creds, keys }: SignalAuthState) => {
-    loadSession: (id: string) => Promise<libsignal.SessionRecord | undefined>;
+    loadSession: (id: string) => Promise<any>;
     storeSession: (id: any, session: any) => Promise<void>;
     isTrustedIdentity: () => boolean;
     loadPreKey: (id: number | string) => Promise<{

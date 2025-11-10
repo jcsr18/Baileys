@@ -22,7 +22,8 @@ import {
 import type { DeviceListData, ParsedDeviceInfo, USyncQueryResultList } from '../WAUSync'
 import { Curve, generateSignalPubKey } from './crypto'
 import { encodeBigEndian } from './generics'
-import * as libsignal from "libsignal";
+/* @ts-ignore */
+import * as libsignal from '@whiskeysockets/libsignal'
 import { SenderKeyRecord } from '../Signal/Group'
 
 function chunk<T>(array: T[], size: number): T[][] {
