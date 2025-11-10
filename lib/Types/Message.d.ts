@@ -9,6 +9,8 @@ import type { CacheStore } from './Socket.js';
 export { proto as WAProto };
 export type WAMessage = proto.IWebMessageInfo & {
     key: WAMessageKey;
+    category?: string;
+    retryCount?: number;
 };
 export type WAMessageContent = proto.IMessage;
 export type WAContactMessage = proto.Message.IContactMessage;
@@ -19,6 +21,7 @@ export type WAMessageKey = proto.IMessageKey & {
     senderPn?: string;
     participantLid?: string;
     participantPn?: string;
+    recipientLid?: string;
     isViewOnce?: boolean;
 };
 export type WATextMessage = proto.Message.IExtendedTextMessage;

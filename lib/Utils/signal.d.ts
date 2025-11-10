@@ -1,8 +1,8 @@
 import type { SignalAuthState, SignalRepository } from '../Types/index.js';
 import type { AuthenticationCreds, AuthenticationState, KeyPair, SignalIdentity, SignalKeyStore, SignedKeyPair } from '../Types/Auth.js';
 import { type BinaryNode, type JidWithDevice } from '../WABinary/index.js';
-import type { USyncQueryResultList } from '../WAUSync/index.js';
-import { SenderKeyRecord } from '../Signal/Group/index.js';
+import { SenderKeyName, SenderKeyRecord } from '../Signal/Group/index.js';
+import { proto } from '../../WAProto';
 export declare const createSignalIdentity: (wid: string, accountSignatureKey: Uint8Array) => SignalIdentity;
 export declare const getPreKeys: ({ get }: SignalKeyStore, min: number, limit: number) => Promise<{
     [id: string]: KeyPair;
@@ -17,7 +17,7 @@ export declare const generateOrGetPreKeys: (creds: AuthenticationCreds, range: n
 export declare const xmppSignedPreKey: (key: SignedKeyPair) => BinaryNode;
 export declare const xmppPreKey: (pair: KeyPair, id: number) => BinaryNode;
 export declare const parseAndInjectE2ESessions: (node: BinaryNode, repository: SignalRepository) => Promise<void>;
-export declare const extractDeviceJids: (result: USyncQueryResultList[], myJid: string, excludeZeroDevices: boolean) => JidWithDevice[];
+export declare const extractDeviceJids: (result: BinaryNode, myJid: string, excludeZeroDevices: boolean) => JidWithDevice[];
 /**
  * get the next N keys for upload or processing
  * @param count number of pre-keys to get or generate
@@ -58,4 +58,8 @@ export declare const encryptSignalProto: (user: string, buffer: Buffer, auth: Si
     type: string;
     ciphertext: Buffer<ArrayBuffer>;
 }>;
+export declare const jidToSignalSenderKeyName: (group: string, user: string) => SenderKeyName;
+export declare const decryptGroupSignalProto: (group: string, user: string, msg: Buffer | Uint8Array, auth: SignalAuthState) => Promise<Uint8Array<ArrayBufferLike>>;
+export declare const decryptSignalProto: (user: string, type: "pkmsg" | "msg", msg: Buffer | Uint8Array, auth: SignalAuthState) => Promise<Buffer<ArrayBufferLike>>;
+export declare const processSenderKeyMessage: (authorJid: string, item: proto.Message.ISenderKeyDistributionMessage, auth: SignalAuthState) => Promise<void>;
 //# sourceMappingURL=signal.d.ts.map

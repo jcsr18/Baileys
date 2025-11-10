@@ -1,6 +1,6 @@
 import { Boom } from '@hapi/boom'
 import { proto } from '../../WAProto/index.js'
-import type { SignalRepository, WAMessage, WAMessageKey } from '../Types'
+import type { AuthenticationState, SignalRepository, WAMessage, WAMessageKey } from '../Types'
 import {
 	areJidsSameUser,
 	type BinaryNode,
@@ -10,12 +10,15 @@ import {
 	isJidNewsletter,
 	isJidStatusBroadcast,
 	isJidUser,
-	isLidUser
+	isLidUser,
+	jidDecode,
+	jidEncode
 } from '../WABinary'
 import { unpadRandomMax16 } from './generics'
 import type { ILogger } from './logger'
+import { decryptGroupSignalProto, decryptSignalProto, processSenderKeyMessage } from './signal'
 
-export const NO_MESSAGE_FOUND_ERROR_TEXT = 'Message absent from node'
+export const NO_MESSAGE_FOUND_ERROR_TEXT = "Message absent from node";
 export const MISSING_KEYS_ERROR_TEXT = 'Key used already or never filled'
 
 export const NACK_REASONS = {
@@ -34,206 +37,242 @@ export const NACK_REASONS = {
 	DBOperationFailed: 552
 }
 
+
 type MessageType =
-	| 'chat'
-	| 'peer_broadcast'
-	| 'other_broadcast'
-	| 'group'
-	| 'direct_peer_status'
-	| 'other_status'
-	| 'newsletter'
+	| "chat"
+	| "peer_broadcast"
+	| "other_broadcast"
+	| "group"
+	| "direct_peer_status"
+	| "other_status"
+	| "newsletter";
 
-/**
- * Decode the received node as a message.
- * @note this will only parse the message, not decrypt it
- */
-export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: string) {
-	let msgType: MessageType
-	let chatId: string
-	let author: string
+export const decodeMessageStanza = (
+	stanza: BinaryNode,
+	auth: AuthenticationState
+) => {
+	let msgType: MessageType;
+	let chatId: string;
+	let author: string;
 
-	const msgId = stanza.attrs.id
-	const from = stanza.attrs.from
-	const participant: string | undefined = stanza.attrs.participant
-	const recipient: string | undefined = stanza.attrs.recipient
+	const meLidUser = jidDecode(auth.creds.me!.lid)?.user!;
 
-	const isMe = (jid: string) => areJidsSameUser(jid, meId)
-	const isMeLid = (jid: string) => areJidsSameUser(jid, meLid)
+	const senderPn = stanza.attrs.sender_lid
+		? stanza.attrs.from
+		: stanza.attrs.sender_pn;
+
+	const senderLid = stanza.attrs.sender_pn
+		? stanza.attrs.from
+		: stanza.attrs.sender_lid;
+
+	const participantPn = isJidUser(stanza.attrs.participant)
+		? stanza.attrs.participant
+		: stanza.attrs.participant_pn;
+
+	const participantLid = isLidUser(stanza.attrs.participant)
+		? stanza.attrs.participant
+		: stanza.attrs.participant_lid;
+
+	const isGroup = isJidGroup(stanza.attrs.from);
+
+	const fromLidUser = jidDecode(senderLid)?.user;
+	const fromDevice = jidDecode(stanza.attrs.from)?.device;
+
+	const participantLidUser = jidDecode(participantLid)?.user;
+	const participantDevice = jidDecode(stanza.attrs.participant)?.device;
+
+	const participantFullLid = participantLidUser
+		? jidEncode(participantLidUser, "lid", participantDevice)
+		: undefined;
+
+	const fromFullLid =
+		!isGroup && fromLidUser
+			? jidEncode(fromLidUser, "lid", fromDevice)
+			: undefined;
+
+	const msgId = stanza.attrs.id;
+	const from = String(fromFullLid || stanza.attrs.from);
+	const participant = participantFullLid || stanza.attrs.participant;
+	const recipient = stanza.attrs.recipient;
+	const recipientLid = stanza.attrs.peer_recipient_lid;
+
+	const isMe = (jid: string) => areJidsSameUser(jid, auth.creds.me!.id);
+	const isMeLid = (jid: string) => areJidsSameUser(jid, auth.creds.me!.lid);
 
 	if (isJidUser(from) || isLidUser(from)) {
 		if (recipient && !isJidMetaIa(recipient)) {
-			if (!isMe(from!) && !isMeLid(from!)) {
-				throw new Boom('receipient present, but msg not from me', { data: stanza })
+			if (!isMe(from) && !isMeLid(from)) {
+				throw new Boom("recipient present, but msg not from me", {
+					data: stanza
+				});
 			}
 
-			chatId = recipient
+			chatId = recipient;
 		} else {
-			chatId = from!
+			chatId = from;
 		}
 
-		msgType = 'chat'
-		author = from!
+		msgType = "chat";
+		author = isMe(from) ? jidEncode(meLidUser, "lid", fromDevice) : from;
 	} else if (isJidGroup(from)) {
 		if (!participant) {
-			throw new Boom('No participant in group message')
+			throw new Boom("No participant in group message");
 		}
 
-		msgType = 'group'
-		author = participant
-		chatId = from!
+		msgType = "group";
+		author = participant;
+		chatId = from;
 	} else if (isJidBroadcast(from)) {
 		if (!participant) {
-			throw new Boom('No participant in group message')
+			throw new Boom("No participant in group message");
 		}
 
-		const isParticipantMe = isMe(participant)
-		if (isJidStatusBroadcast(from!)) {
-			msgType = isParticipantMe ? 'direct_peer_status' : 'other_status'
+		const isParticipantMe = isMe(participant);
+		if (isJidStatusBroadcast(from)) {
+			msgType = isParticipantMe ? "direct_peer_status" : "other_status";
 		} else {
-			msgType = isParticipantMe ? 'peer_broadcast' : 'other_broadcast'
+			msgType = isParticipantMe ? "peer_broadcast" : "other_broadcast";
 		}
 
-		chatId = from!
-		author = participant
+		chatId = from;
+		author = participant;
 	} else if (isJidNewsletter(from)) {
-		msgType = 'newsletter'
-		chatId = from!
-		author = from!
+		msgType = "newsletter";
+		chatId = from;
+		author = from;
 	} else {
-		throw new Boom('Unknown message type', { data: stanza })
+		throw new Boom("Unknown message type", { data: stanza });
 	}
 
-	const fromMe = (isLidUser(from) ? isMeLid : isMe)((stanza.attrs.participant || stanza.attrs.from)!)
-	const pushname = stanza?.attrs?.notify
+	const sender = msgType === "chat" ? author : chatId;
+
+	const fromMe = (isLidUser(from) || isLidUser(participant) ? isMeLid : isMe)(
+		// @ts-ignore
+		stanza.attrs.participant || stanza.attrs.from
+	);
+	const pushname = stanza.attrs.notify;
 
 	const key: WAMessageKey = {
 		remoteJid: chatId,
 		fromMe,
 		id: msgId,
-		senderLid: stanza?.attrs?.sender_lid,
-		senderPn: stanza?.attrs?.sender_pn,
+		senderLid,
+		senderPn,
 		participant,
-		participantPn: stanza?.attrs?.participant_pn,
-		participantLid: stanza?.attrs?.participant_lid,
-		...(msgType === 'newsletter' && stanza.attrs.server_id ? { server_id: stanza.attrs.server_id } : {})
-	}
+		participantPn,
+		participantLid,
+		recipientLid
+	};
 
 	const fullMessage: WAMessage = {
 		key,
-		messageTimestamp: +stanza.attrs.t!,
-		pushName: pushname,
-		broadcast: isJidBroadcast(from)
-	}
+		category: stanza.attrs.category,
+		// @ts-ignore
+		messageTimestamp: +stanza.attrs.t,
+		pushName: pushname
+	};
 
 	if (key.fromMe) {
-		fullMessage.status = proto.WebMessageInfo.Status.SERVER_ACK
+		fullMessage.status = proto.WebMessageInfo.Status.SERVER_ACK;
 	}
 
-	return {
-		fullMessage,
-		author,
-		sender: msgType === 'chat' ? author : chatId
-	}
-}
-
-export const decryptMessageNode = (
-	stanza: BinaryNode,
-	meId: string,
-	meLid: string,
-	repository: SignalRepository,
-	logger: ILogger
-) => {
-	const { fullMessage, author, sender } = decodeMessageNode(stanza, meId, meLid)
 	return {
 		fullMessage,
 		category: stanza.attrs.category,
 		author,
-		async decrypt() {
-			let decryptables = 0
+		decryptionTask: (async () => {
+			let decryptables = 0;
 			if (Array.isArray(stanza.content)) {
 				for (const { tag, attrs, content } of stanza.content) {
-					if (tag === 'verified_name' && content instanceof Uint8Array) {
-						const cert = proto.VerifiedNameCertificate.decode(content)
-						const details = proto.VerifiedNameCertificate.Details.decode(cert.details!)
-						fullMessage.verifiedBizName = details.verifiedName
+					if (tag === "unavailable" && attrs.type === "view_once") {
+						fullMessage.key.isViewOnce = true;
 					}
 
-					if (tag === 'unavailable' && attrs.type === 'view_once') {
-						fullMessage.key.isViewOnce = true
+					if (tag === "verified_name" && content instanceof Uint8Array) {
+						const cert = proto.VerifiedNameCertificate.decode(content);
+						const details = proto.VerifiedNameCertificate.Details.decode(
+							cert.details!
+						);
+						fullMessage.verifiedBizName = details.verifiedName;
 					}
 
-					if (tag !== 'enc' && tag !== 'plaintext') {
-						continue
+					if (attrs.count && tag === "enc") {
+						fullMessage.retryCount = Number(attrs.count);
+					}
+
+					if (tag !== "enc" && tag !== "plaintext") {
+						continue;
 					}
 
 					if (!(content instanceof Uint8Array)) {
-						continue
+						continue;
 					}
 
-					decryptables += 1
+					decryptables += 1;
 
-					let msgBuffer: Uint8Array
+					let msgBuffer: Uint8Array<ArrayBufferLike>;
 
 					try {
-						const e2eType = tag === 'plaintext' ? 'plaintext' : attrs.type
+						const e2eType = tag === "plaintext" ? "plaintext" : attrs.type;
 						switch (e2eType) {
-							case 'skmsg':
-								msgBuffer = await repository.decryptGroupMessage({
-									group: sender,
-									authorJid: author,
-									msg: content
-								})
-								break
-							case 'pkmsg':
-							case 'msg':
-								const user = isJidUser(sender) ? sender : author
-								msgBuffer = await repository.decryptMessage({
-									jid: user,
-									type: e2eType,
-									ciphertext: content
-								})
-								break
-							case 'plaintext':
-								msgBuffer = content
-								break
+							case "skmsg":
+								msgBuffer = await decryptGroupSignalProto(
+									sender,
+									author,
+									content,
+									auth
+								);
+								break;
+							case "pkmsg":
+							case "msg":
+								const user = isJidUser(sender) ? sender : author;
+								msgBuffer = await decryptSignalProto(
+									user,
+									e2eType,
+									content as Buffer,
+									auth
+								);
+								break;
+							case "msmsg":
+								return; // ignore meta IA messages
+							case "plaintext":
+								msgBuffer = content as Buffer;
+								break;
 							default:
-								throw new Error(`Unknown e2e type: ${e2eType}`)
+								throw new Error(`Unknown e2e type: ${e2eType}`);
 						}
 
 						let msg: proto.IMessage = proto.Message.decode(
-							e2eType !== 'plaintext' ? unpadRandomMax16(msgBuffer) : msgBuffer
-						)
-						msg = msg.deviceSentMessage?.message || msg
+							e2eType !== "plaintext" ? unpadRandomMax16(msgBuffer) : msgBuffer
+						);
+
+						msg = msg.deviceSentMessage?.message || msg;
 						if (msg.senderKeyDistributionMessage) {
-							//eslint-disable-next-line max-depth
-							try {
-								await repository.processSenderKeyDistributionMessage({
-									authorJid: author,
-									item: msg.senderKeyDistributionMessage
-								})
-							} catch (err) {
-								logger.error({ key: fullMessage.key, err }, 'failed to decrypt message')
-							}
+							await processSenderKeyMessage(
+								author,
+								msg.senderKeyDistributionMessage,
+								auth
+							);
 						}
 
 						if (fullMessage.message) {
-							Object.assign(fullMessage.message, msg)
+							Object.assign(fullMessage.message, msg);
 						} else {
-							fullMessage.message = msg
+							fullMessage.message = msg;
 						}
-					} catch (err: any) {
-						logger.error({ key: fullMessage.key, err }, 'failed to decrypt message')
-						fullMessage.messageStubType = proto.WebMessageInfo.StubType.CIPHERTEXT
-						fullMessage.messageStubParameters = [err.message]
+					} catch (error: any) {
+						fullMessage.messageStubType =
+							proto.WebMessageInfo.StubType.CIPHERTEXT;
+						fullMessage.messageStubParameters = [error.message];
 					}
 				}
 			}
 
 			// if nothing was found to decrypt
-			if (!decryptables) {
-				fullMessage.messageStubType = proto.WebMessageInfo.StubType.CIPHERTEXT
-				fullMessage.messageStubParameters = [NO_MESSAGE_FOUND_ERROR_TEXT]
+			if (!decryptables && !fullMessage.key?.isViewOnce) {
+				fullMessage.messageStubType = proto.WebMessageInfo.StubType.CIPHERTEXT;
+				fullMessage.messageStubParameters = [NO_MESSAGE_FOUND_ERROR_TEXT];
 			}
-		}
-	}
-}
+		})()
+	};
+};

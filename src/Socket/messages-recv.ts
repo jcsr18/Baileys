@@ -21,8 +21,7 @@ import {
 	cleanMessage,
 	Curve,
 	decodeMediaRetryNode,
-	decodeMessageNode,
-	decryptMessageNode,
+	decodeMessageStanza,
 	delay,
 	derivePairingCodeKey,
 	encodeBigEndian,
@@ -33,8 +32,7 @@ import {
 	getStatusFromReceiptType,
 	hkdf,
 	MISSING_KEYS_ERROR_TEXT,
-	NACK_REASONS,
-	NO_MESSAGE_FOUND_ERROR_TEXT,
+	NACK_REASONS, NO_MESSAGE_FOUND_ERROR_TEXT,
 	unixTimestampSeconds,
 	xmppPreKey,
 	xmppSignedPreKey
@@ -82,6 +80,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
 	/** this mutex ensures that each retryRequest will wait for the previous one to finish */
 	const retryMutex = makeMutex()
+
+	const msgRetryMap = config.msgRetryCounterMap || {};
 
 	const msgRetryCache =
 		config.msgRetryCounterCache ||
@@ -165,90 +165,87 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 	}
 
 	const sendRetryRequest = async (node: BinaryNode, forceIncludeKeys = false) => {
-		const { fullMessage } = decodeMessageNode(node, authState.creds.me!.id, authState.creds.me!.lid || '')
-		const { key: msgKey } = fullMessage
-		const msgId = msgKey.id!
+		const msgId: any = node.attrs.id;
 
-		const key = `${msgId}:${msgKey?.participant}`
-		let retryCount = msgRetryCache.get<number>(key) || 0
-		if (retryCount >= maxMsgRetryCount) {
-			logger.debug({ retryCount, msgId }, 'reached retry limit, clearing')
-			msgRetryCache.del(key)
-			return
+		let retryCount = msgRetryMap[msgId] || 0;
+		if (retryCount >= 5) {
+			logger.error({ retryCount, msgId }, "reached retry limit, clearing");
+			delete msgRetryMap[msgId];
+			return;
 		}
 
-		retryCount += 1
-		msgRetryCache.set(key, retryCount)
+		retryCount += 1;
+		msgRetryMap[msgId] = retryCount;
 
-		const { account, signedPreKey, signedIdentityKey: identityKey } = authState.creds
+		const {
+			account,
+			signedPreKey,
+			signedIdentityKey: identityKey
+		} = authState.creds;
 
-		if (retryCount === 1) {
-			//request a resend via phone
-			const msgId = await requestPlaceholderResend(msgKey)
-			logger.debug(`sendRetryRequest: requested placeholder resend for message ${msgId}`)
-		}
-
-		const deviceIdentity = encodeSignedDeviceIdentity(account!, true)
+		const deviceIdentity = encodeSignedDeviceIdentity(account!, true);
 		await authState.keys.transaction(async () => {
 			const receipt: BinaryNode = {
-				tag: 'receipt',
+				tag: "receipt",
 				attrs: {
 					id: msgId,
-					type: 'retry',
-					to: node.attrs.from!
+					type: "retry",
+					to: node.attrs.from as any
 				},
 				content: [
 					{
-						tag: 'retry',
+						tag: "retry",
 						attrs: {
 							count: retryCount.toString(),
-							id: node.attrs.id!,
-							t: node.attrs.t!,
-							v: '1'
+							id: node.attrs.id as any,
+							t: node.attrs.t as any,
+							v: "1"
 						}
 					},
 					{
-						tag: 'registration',
+						tag: "registration",
 						attrs: {},
 						content: encodeBigEndian(authState.creds.registrationId)
 					}
 				]
-			}
+			};
 
 			if (node.attrs.recipient) {
-				receipt.attrs.recipient = node.attrs.recipient
+				receipt.attrs.recipient = node.attrs.recipient;
 			}
 
 			if (node.attrs.participant) {
-				receipt.attrs.participant = node.attrs.participant
+				receipt.attrs.participant = node.attrs.participant;
 			}
 
 			if (retryCount > 1 || forceIncludeKeys) {
-				const { update, preKeys } = await getNextPreKeys(authState, 1)
+				const { update, preKeys } = await getNextPreKeys(authState, 1);
 
-				const [keyId] = Object.keys(preKeys)
-				const key = preKeys[+keyId!]
+				let [kId] = Object.keys(preKeys);
+				const keyId: any = kId;
 
-				const content = receipt.content! as BinaryNode[]
+				const key: any = preKeys[+keyId];
+
+				const content = receipt.content! as BinaryNode[];
 				content.push({
-					tag: 'keys',
+					tag: "keys",
 					attrs: {},
 					content: [
-						{ tag: 'type', attrs: {}, content: Buffer.from(KEY_BUNDLE_TYPE) },
-						{ tag: 'identity', attrs: {}, content: identityKey.public },
-						xmppPreKey(key!, +keyId!),
+						{ tag: "type", attrs: {}, content: Buffer.from(KEY_BUNDLE_TYPE) },
+						{ tag: "identity", attrs: {}, content: identityKey.public },
+						xmppPreKey(key, +keyId),
 						xmppSignedPreKey(signedPreKey),
-						{ tag: 'device-identity', attrs: {}, content: deviceIdentity }
+						{ tag: "device-identity", attrs: {}, content: deviceIdentity }
 					]
-				})
+				});
 
-				ev.emit('creds.update', update)
+				ev.emit("creds.update", update);
 			}
 
-			await sendNode(receipt)
+			await sendNode(receipt);
 
-			logger.info({ msgAttrs: node.attrs, retryCount }, 'sent retry receipt')
-		})
+			logger.debug({ msgAttrs: node.attrs, retryCount }, "sent retry receipt");
+		});
 	}
 
 	const handleEncryptNotification = async (node: BinaryNode) => {
@@ -605,13 +602,6 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		// just re-send the message to everyone
 		// prevents the first message decryption failure
 		const sendToAll = !jidDecode(participant)?.device
-		await assertSessions([participant], true)
-
-		if (isJidGroup(remoteJid)) {
-			await authState.keys.set({ 'sender-key-memory': { [remoteJid]: null } })
-		}
-
-		logger.debug({ participant, sendToAll }, 'forced new session for retry recp')
 
 		for (const [i, msg] of msgs.entries()) {
 			if (msg) {
@@ -760,66 +750,34 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 	}
 
 	const handleMessage = async (node: BinaryNode) => {
-		if (shouldIgnoreJid(node.attrs.from!) && node.attrs.from !== '@s.whatsapp.net') {
-			logger.debug({ key: node.attrs.key }, 'ignored message')
-			await sendMessageAck(node)
-			return
-		}
-
-		const encNode = getBinaryNodeChild(node, 'enc')
-
-		// TODO: temporary fix for crashes and issues resulting of failed msmsg decryption
-		if (encNode && encNode.attrs.type === 'msmsg') {
-			logger.debug({ key: node.attrs.key }, 'ignored msmsg')
-			await sendMessageAck(node)
-			return
-		}
-
-		let response: string | undefined
-
-		if (getBinaryNodeChild(node, 'unavailable') && !encNode) {
-			await sendMessageAck(node)
-			const { key } = decodeMessageNode(node, authState.creds.me!.id, authState.creds.me!.lid || '').fullMessage
-			response = await requestPlaceholderResend(key)
-			if (response === 'RESOLVED') {
-				return
-			}
-
-			logger.debug('received unavailable message, acked and requested resend from phone')
-		} else {
-			if (placeholderResendCache.get(node.attrs.id!)) {
-				placeholderResendCache.del(node.attrs.id!)
-			}
-		}
-
-		const {
-			fullMessage: msg,
-			category,
-			author,
-			decrypt
-		} = decryptMessageNode(node, authState.creds.me!.id, authState.creds.me!.lid || '', signalRepository, logger)
-
-		if (response && msg?.messageStubParameters?.[0] === NO_MESSAGE_FOUND_ERROR_TEXT) {
-			msg.messageStubParameters = [NO_MESSAGE_FOUND_ERROR_TEXT, response]
-		}
-
 		if (
-			msg.message?.protocolMessage?.type === proto.Message.ProtocolMessage.Type.SHARE_PHONE_NUMBER &&
-			node.attrs.sender_pn
+			shouldIgnoreJid(node.attrs.from!) &&
+			node.attrs.from! !== "@s.whatsapp.net"
 		) {
-			ev.emit('chats.phoneNumberShare', { lid: node.attrs.from!, jid: node.attrs.sender_pn })
+			logger.debug({ key: node.attrs.key }, "ignored message");
+			await sendMessageAck(node);
+			return;
 		}
 
 		try {
+			const {
+				fullMessage: msg,
+				category,
+				author,
+				decryptionTask
+			} = decodeMessageStanza(node, authState);
 			await Promise.all([
 				processingMutex.mutex(async () => {
-					await decrypt()
+					await decryptionTask;
 					// message failed to decrypt
-					if (msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT) {
-						if (msg?.messageStubParameters?.[0] === MISSING_KEYS_ERROR_TEXT) {
-							return sendMessageAck(node, NACK_REASONS.ParsingError)
-						}
-
+					if (
+						msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT &&
+						category !== "peer"
+					) {
+						logger.debug(
+							{ key: msg.key, params: msg.messageStubParameters },
+							"failure in decrypting message"
+						);
 						retryMutex.mutex(async () => {
 							if (ws.isOpen) {
 								if (getBinaryNodeChild(node, 'unavailable')) {
@@ -837,41 +795,46 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 						})
 					} else {
 						// no type in the receipt => message delivered
-						let type: MessageReceiptType = undefined
-						let participant = msg.key.participant
-						if (category === 'peer') {
+						let type: MessageReceiptType = undefined;
+						let participant = msg.key.participant;
+						if (category === "peer") {
 							// special peer message
-							type = 'peer_msg'
+							type = "peer_msg";
 						} else if (msg.key.fromMe) {
 							// message was sent by us from a different device
-							type = 'sender'
+							type = "sender";
 							// need to specially handle this case
 							if (isJidUser(msg.key.remoteJid!)) {
-								participant = author
+								participant = author;
 							}
 						} else if (!sendActiveReceipts) {
-							type = 'inactive'
+							type = "inactive";
 						}
 
-						await sendReceipt(msg.key.remoteJid!, participant!, [msg.key.id!], type)
+						await sendReceipt(
+							msg.key.remoteJid!,
+							participant!,
+							[msg.key.id!],
+							type
+						);
 
 						// send ack for history message
-						const isAnyHistoryMsg = getHistoryMsg(msg.message!)
+						const isAnyHistoryMsg = getHistoryMsg(msg.message!);
 						if (isAnyHistoryMsg) {
-							const jid = jidNormalizedUser(msg.key.remoteJid!)
-							await sendReceipt(jid, undefined, [msg.key.id!], 'hist_sync')
+							const jid = jidNormalizedUser(msg.key.remoteJid!);
+							await sendReceipt(jid, undefined, [msg.key.id!], "hist_sync");
 						}
 					}
 
-					cleanMessage(msg, authState.creds.me!.id)
+					cleanMessage(msg, authState.creds.me!.id);
 
-					await upsertMessage(msg, node.attrs.offline ? 'append' : 'notify')
+					await upsertMessage(msg, node.attrs.offline ? "append" : "notify");
 				})
-			])
-		} catch (error) {
-			logger.error({ error, node }, 'error in handling message')
+			]);
+		} finally {
+			await sendMessageAck(node);
 		}
-	}
+	};
 
 	const fetchMessageHistory = async (
 		count: number,

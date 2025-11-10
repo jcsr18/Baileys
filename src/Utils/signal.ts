@@ -24,7 +24,15 @@ import { Curve, generateSignalPubKey } from './crypto'
 import { encodeBigEndian } from './generics'
 /* @ts-ignore */
 import * as libsignal from '@whiskeysockets/libsignal'
-import { SenderKeyRecord } from '../Signal/Group'
+import {
+	GroupCipher,
+	GroupSessionBuilder,
+	SenderKeyDistributionMessage,
+	SenderKeyName,
+	SenderKeyRecord
+} from '../Signal/Group'
+import type { SenderKeyStore } from '../Signal/Group/group_cipher.ts'
+import { proto } from '../../WAProto'
 
 function chunk<T>(array: T[], size: number): T[][] {
 	const chunks: T[][] = []
@@ -132,29 +140,47 @@ export const parseAndInjectE2ESessions = async (node: BinaryNode, repository: Si
 	}
 }
 
-export const extractDeviceJids = (result: USyncQueryResultList[], myJid: string, excludeZeroDevices: boolean) => {
-	const { user: myUser, device: myDevice } = jidDecode(myJid)!
+export const extractDeviceJids = (
+	result: BinaryNode,
+	myJid: string,
+	excludeZeroDevices: boolean
+) => {
+	const { user: myUser, device: myDevice } = jidDecode(myJid)!;
+	const extracted: JidWithDevice[] = [];
+	for (const node of result.content as BinaryNode[]) {
+		const list = getBinaryNodeChild(node, "list")?.content;
+		if (list && Array.isArray(list)) {
+			for (const item of list) {
+				const { user } = jidDecode(item.attrs.jid)!;
+				const devicesNode = getBinaryNodeChild(item, "devices");
+				const lidNode = getBinaryNodeChild(item, "lid");
+				const lid = jidDecode(lidNode?.attrs?.val)?.user;
+				const deviceListNode = getBinaryNodeChild(devicesNode, "device-list");
+				if (Array.isArray(deviceListNode?.content)) {
+					for (const { tag, attrs } of deviceListNode!.content) {
+						if (attrs && attrs.id) {
+							const device = +attrs.id;
 
-	const extracted: JidWithDevice[] = []
-
-	for (const userResult of result) {
-		const { devices, id } = userResult as { devices: ParsedDeviceInfo; id: string }
-		const { user } = jidDecode(id)!
-		const deviceList = devices?.deviceList as DeviceListData[]
-		if (Array.isArray(deviceList)) {
-			for (const { id: device, keyIndex } of deviceList) {
-				if (
-					(!excludeZeroDevices || device !== 0) && // if zero devices are not-excluded, or device is non zero
-					(myUser !== user || myDevice !== device) && // either different user or if me user, not this device
-					(device === 0 || !!keyIndex) // ensure that "key-index" is specified for "non-zero" devices, produces a bad req otherwise
-				) {
-					extracted.push({ user, device })
+							if (
+								tag === "device" && // ensure the "device" tag
+								(!excludeZeroDevices || device !== 0) && // if zero devices are not-excluded, or device is non zero
+								(myUser !== user || myDevice !== device) && // either different user or if me user, not this device
+								(device === 0 || !!attrs["key-index"]) // ensure that "key-index" is specified for "non-zero" devices, produces a bad req otherwise
+							) {
+								extracted.push({ user, device });
+								extracted.push({
+									user: lid || user,
+									device
+								});
+							}
+						}
+					}
 				}
 			}
 		}
 	}
 
-	return extracted
+	return extracted;
 }
 
 /**
@@ -266,4 +292,72 @@ export const encryptSignalProto = async (
 	const { type: sigType, body } = await cipher.encrypt(buffer);
 	const type = sigType === 3 ? "pkmsg" : "msg";
 	return { type, ciphertext: Buffer.from(body, "binary") };
+};
+
+export const jidToSignalSenderKeyName = (
+	group: string,
+	user: string
+): SenderKeyName => {
+	return new SenderKeyName(group, jidToSignalProtocolAddress(user));
+};
+
+export const decryptGroupSignalProto = (
+	group: string,
+	user: string,
+	msg: Buffer | Uint8Array,
+	auth: SignalAuthState
+) => {
+	const senderName = jidToSignalSenderKeyName(group, user);
+	// @ts-ignore
+	const cipher = new GroupCipher(signalStorage(auth), senderName);
+
+	return cipher.decrypt(Buffer.from(msg));
+};
+
+export const decryptSignalProto = async (
+	user: string,
+	type: "pkmsg" | "msg",
+	msg: Buffer | Uint8Array,
+	auth: SignalAuthState
+) => {
+	const addr = jidToSignalProtocolAddress(user);
+	const session = new libsignal.SessionCipher(signalStorage(auth), addr);
+	let result: Buffer;
+	switch (type) {
+		case "pkmsg":
+			result = await session.decryptPreKeyWhisperMessage(msg);
+			break;
+		case "msg":
+			result = await session.decryptWhisperMessage(msg);
+			break;
+	}
+
+	return result;
+};
+
+export const processSenderKeyMessage = async (
+	authorJid: string,
+	item: proto.Message.ISenderKeyDistributionMessage,
+	auth: SignalAuthState
+) => {
+	// @ts-ignore
+	const builder = new GroupSessionBuilder(signalStorage(auth));
+	const senderName = jidToSignalSenderKeyName(item.groupId!, authorJid);
+
+	const senderMsg = new SenderKeyDistributionMessage(
+		null,
+		null,
+		null,
+		null,
+		item.axolotlSenderKeyDistributionMessage
+	);
+	const { [senderName.toString()]: senderKey } = await auth.keys.get("sender-key", [
+		senderName.toString()
+	]);
+	if (!senderKey) {
+		const record = new SenderKeyRecord() as any;
+		await auth.keys.set({ "sender-key": { [senderName.toString()]: record} });
+	}
+
+	await builder.process(senderName, senderMsg);
 };

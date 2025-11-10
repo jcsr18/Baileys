@@ -24,6 +24,8 @@ export type CacheStore = {
 
 export type PatchedMessageWithRecipientJID = proto.IMessage & { recipientJid?: string }
 
+export type MessageRetryMap = { [msgId: string]: number };
+
 export type SocketConfig = {
 	/** the WS url to connect to WA */
 	waWebSocketUrl: string | URL
@@ -69,6 +71,12 @@ export type SocketConfig = {
 	transactionOpts: TransactionCapabilityOptions
 	/** marks the client as online whenever the socket successfully connects */
 	markOnlineOnConnect: boolean
+
+	/**
+	 * map to store the retry counts for failed messages;
+	 * used to determine whether to retry a message or not */
+	msgRetryCounterMap?: MessageRetryMap;
+
 	/** alphanumeric country code (USA -> US) for the number used */
 	countryCode: string
 	/** provide a cache to store media, so does not have to be re-uploaded */
