@@ -32,7 +32,7 @@ import {
 	SenderKeyRecord
 } from '../Signal/Group'
 import type { SenderKeyStore } from '../Signal/Group/group_cipher.ts'
-import { proto } from '../../WAProto'
+import { proto } from '../../WAProto/index.js'
 
 function chunk<T>(array: T[], size: number): T[][] {
 	const chunks: T[][] = []
